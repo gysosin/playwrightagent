@@ -186,6 +186,10 @@ class PlaywrightMCPClient:
             args["ref"] = ref
         return await self.call_tool("browser_type", args)
 
+    async def wait_for(self, selector: str, timeout_ms: int = 5000) -> dict:
+        """Wait for an element to appear."""
+        return await self.call_tool("browser_wait_for_selector", {"selector": selector, "timeout": timeout_ms})
+
     async def screenshot(self) -> bytes:
         """Take a screenshot and return raw PNG bytes."""
         result = await self.call_tool("browser_screenshot", {})
