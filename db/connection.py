@@ -32,10 +32,15 @@ async def init_pool() -> None:
     global _pool
     if _pool is not None:
         return
-    _pool = await asyncpg.create_pool(dsn=get_settings().postgres_dsn)
+    _pool = await asyncpg.create_pool(
+        dsn=get_settings().postgres_dsn,
+        min_size=2,
+        max_size=10,
+        command_timeout=60,
+    )
 
 
-async def get_pool() -> asyncpg.Pool:
+def get_pool() -> asyncpg.Pool:
     """Return the initialised connection pool.
 
     Raises:
@@ -62,17 +67,17 @@ async def close_pool() -> None:
 
 async def execute(query: str, *args: object) -> str:
     """Execute a query and return the status string (e.g. ``INSERT 0 1``)."""
-    pool = await get_pool()
+    pool = get_pool()
     return await pool.execute(query, *args)
 
 
 async def fetch(query: str, *args: object) -> list[asyncpg.Record]:
     """Execute a query and return all resulting rows."""
-    pool = await get_pool()
+    pool = get_pool()
     return await pool.fetch(query, *args)
 
 
 async def fetchrow(query: str, *args: object) -> asyncpg.Record | None:
     """Execute a query and return the first row, or ``None``."""
-    pool = await get_pool()
+    pool = get_pool()
     return await pool.fetchrow(query, *args)

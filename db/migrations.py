@@ -71,16 +71,22 @@ CREATE TABLE IF NOT EXISTS revisions (
     reason TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_step_sequences_task_active
+    ON step_sequences (task_id, is_active) WHERE is_active = true;
+
+CREATE INDEX IF NOT EXISTS idx_executions_task_started
+    ON executions (task_id, started_at DESC);
 """
 
 
 def _admin_dsn() -> str:
-    """Build a DSN that connects to the ``maindb`` database."""
+    """Build a DSN that connects to the ``postgres`` maintenance database."""
     s = get_settings()
     return (
         f"postgresql://{quote_plus(s.POSTGRES_USER)}"
         f":{quote_plus(s.POSTGRES_PASSWORD.get_secret_value())}"
-        f"@{s.POSTGRES_HOST}:{s.POSTGRES_PORT}/maindb"
+        f"@{s.POSTGRES_HOST}:{s.POSTGRES_PORT}/postgres"
     )
 
 
