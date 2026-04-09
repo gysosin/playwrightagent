@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: SecretStr = SecretStr("minioadmin123")
     MINIO_BUCKET: str = "adk-snapshots"
 
+    # --- Playwright MCP ----------------------------------------------------
+    PLAYWRIGHT_MCP_URL: str = "http://localhost:8931/sse"
+
     # --- Derived properties ------------------------------------------------
 
     @property
