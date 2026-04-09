@@ -45,14 +45,25 @@ async def _dispatch_action(
             await client.navigate(action["url"])
         case "click":
             await client.click(action["selector"])
+        case "try_click":
+            # Best-effort click — silently skip if element not found.
+            # Use for optional elements like cookie banners, popups, etc.
+            try:
+                await client.click(action["selector"])
+            except Exception:
+                logger.info("try_click skipped (element not found): %s", action.get("selector"))
+        case "hover":
+            await client.hover(action["selector"])
         case "fill":
             await client.fill(action["selector"], action["value"])
         case "wait_for":
-            timeout = action.get("timeout_ms", 5000)
-            await client.wait_for(action["selector"], timeout_ms=timeout)
+            wait_text = action.get("wait_text")
+            wait_seconds = action.get("wait_seconds", 3)
+            if wait_text:
+                await client.wait_for_text(wait_text, timeout_ms=wait_seconds * 1000)
+            else:
+                await client.wait_time(wait_seconds)
         case "screenshot":
-            # The executor already takes a screenshot after every step, but
-            # if the user explicitly requests one, we honor it.
             await client.screenshot()
         case "get_text":
             text = await client.get_text(action["selector"])
@@ -108,16 +119,33 @@ async def execute_steps(task_name: str) -> dict:
     step_logs: list[dict] = []
     final_status = "completed"
     healed = False
+    page_text = ""
 
     async with PlaywrightMCPClient() as client:
         step_idx = 0
         while step_idx < len(steps):
             step = steps[step_idx]
             try:
+                # Capture page content right before a close action.
+                if step.get("action") == "close" and final_status in ("completed", "healed"):
+                    try:
+                        page_text = await client.snapshot()
+                    except Exception:
+                        logger.debug("Could not capture page text before close")
+
                 # Execute the action.
                 result_text = await _dispatch_action(client, step)
 
-                # Take a screenshot after every step.
+                # Take a screenshot after every step (skip after close).
+                if step.get("action") == "close":
+                    step_logs.append({
+                        "step_index": step_idx,
+                        "action": step,
+                        "status": "success",
+                    })
+                    step_idx += 1
+                    continue
+
                 png_bytes = await client.screenshot()
                 snap = await save_snapshot(
                     task_id=task_id,
@@ -155,12 +183,17 @@ async def execute_steps(task_name: str) -> dict:
                     error_msg[:200],
                 )
 
-                # Attempt to capture a screenshot for healing context.
+                # Capture screenshot + page snapshot for healing context.
+                heal_screenshot = b""
+                heal_snapshot_text = ""
                 try:
                     heal_screenshot = await client.screenshot()
                 except Exception:
                     logger.warning("Could not capture screenshot for healing")
-                    heal_screenshot = b""
+                try:
+                    heal_snapshot_text = await client.snapshot()
+                except Exception:
+                    logger.warning("Could not capture page snapshot for healing")
 
                 # Log the failure.
                 snap_info: dict = {}
@@ -194,7 +227,7 @@ async def execute_steps(task_name: str) -> dict:
                 })
 
                 # --- Attempt healing ------------------------------------------
-                if heal_screenshot:
+                if heal_screenshot or heal_snapshot_text:
                     try:
                         heal_result = await heal_step(
                             task_id=task_id,
@@ -205,6 +238,7 @@ async def execute_steps(task_name: str) -> dict:
                             failed_step=step,
                             error_message=error_msg,
                             current_page_screenshot=heal_screenshot,
+                            page_snapshot=heal_snapshot_text,
                         )
 
                         # Update our working copies.
@@ -287,6 +321,13 @@ async def execute_steps(task_name: str) -> dict:
                     final_status = "failed"
                     break
 
+        # Capture page content if not already captured (e.g. no close step).
+        if not page_text and final_status in ("completed", "healed"):
+            try:
+                page_text = await client.snapshot()
+            except Exception:
+                logger.debug("Could not capture final page text", exc_info=True)
+
     # --- Finalize execution ------------------------------------------------
     if healed and final_status == "completed":
         final_status = "healed"
@@ -300,9 +341,12 @@ async def execute_steps(task_name: str) -> dict:
         len(step_logs),
     )
 
-    return {
+    result = {
         "execution_id": execution_id,
         "status": final_status,
         "steps_executed": len(step_logs),
         "step_logs": step_logs,
     }
+    if page_text:
+        result["page_content"] = page_text
+    return result

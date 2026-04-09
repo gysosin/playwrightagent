@@ -33,25 +33,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_URL: str = get_settings().PLAYWRIGHT_MCP_URL
 
 
-async def get_playwright_session() -> ClientSession:
-    """Connect to the Playwright MCP server and return a ready session.
-
-    .. note::
-        This is a *low-level* helper.  Prefer :class:`PlaywrightMCPClient` for
-        most use-cases because it manages the session lifecycle for you.
-
-    The caller is responsible for entering the ``sse_client`` async context
-    and keeping it alive for the lifetime of the session.
-    """
-    settings = get_settings()
-    read_stream, write_stream = sse_client(settings.PLAYWRIGHT_MCP_URL)
-    # The streams are async-context-manager results; in practice use
-    # PlaywrightMCPClient which handles the full lifecycle.
-    session = ClientSession(read_stream, write_stream)
-    await session.initialize()
-    return session
-
-
 class PlaywrightMCPClient:
     """Async context-manager for Playwright MCP sessions.
 
@@ -118,20 +99,7 @@ class PlaywrightMCPClient:
     # ------------------------------------------------------------------
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
-        """Call a Playwright MCP tool and return the result content.
-
-        Parameters
-        ----------
-        tool_name:
-            The MCP tool name (e.g. ``browser_navigate``).
-        arguments:
-            Key/value arguments expected by the tool.
-
-        Returns
-        -------
-        The :class:`mcp.types.CallToolResult` object.  Raises
-        :class:`RuntimeError` if the result indicates an error.
-        """
+        """Call a Playwright MCP tool and return the result content."""
         if self._session is None:
             raise RuntimeError("PlaywrightMCPClient is not connected; use 'async with' block")
 
@@ -145,10 +113,7 @@ class PlaywrightMCPClient:
         return result
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        """Return the list of tools advertised by the server.
-
-        Useful for introspection and debugging.
-        """
+        """Return the list of tools advertised by the server."""
         if self._session is None:
             raise RuntimeError("PlaywrightMCPClient is not connected; use 'async with' block")
 
@@ -159,40 +124,45 @@ class PlaywrightMCPClient:
         ]
 
     # ------------------------------------------------------------------
-    # Convenience wrappers for common browser actions
+    # Convenience wrappers — use browser_run_code for selector-based ops
     # ------------------------------------------------------------------
 
     async def navigate(self, url: str) -> Any:
         """Navigate to *url*."""
         return await self.call_tool("browser_navigate", {"url": url})
 
-    async def click(self, element: str, ref: str | None = None) -> Any:
-        """Click an element.
+    async def click(self, selector: str, timeout_ms: int = 10000) -> Any:
+        """Click an element by CSS selector using Playwright code."""
+        escaped = selector.replace("\\", "\\\\").replace("`", "\\`")
+        code = f"async (page) => {{ await page.locator(`{escaped}`).click({{ timeout: {timeout_ms} }}); }}"
+        return await self.call_tool("browser_run_code", {"code": code})
 
-        The ``@playwright/mcp`` server accepts either a ``selector`` string
-        or an ``element``/``ref`` pair depending on version.  This wrapper
-        sends both ``element`` and ``ref`` when *ref* is provided, otherwise
-        it falls back to passing *element* as the selector.
-        """
-        args: dict[str, Any] = {"element": element}
-        if ref is not None:
-            args["ref"] = ref
-        return await self.call_tool("browser_click", args)
+    async def hover(self, selector: str, timeout_ms: int = 10000) -> Any:
+        """Hover over an element by CSS selector."""
+        escaped = selector.replace("\\", "\\\\").replace("`", "\\`")
+        code = f"async (page) => {{ await page.locator(`{escaped}`).hover({{ timeout: {timeout_ms} }}); }}"
+        return await self.call_tool("browser_run_code", {"code": code})
 
-    async def fill(self, element: str, value: str, ref: str | None = None) -> Any:
-        """Type *value* into an input field identified by *element*."""
-        args: dict[str, Any] = {"element": element, "text": value}
-        if ref is not None:
-            args["ref"] = ref
-        return await self.call_tool("browser_type", args)
+    async def fill(self, selector: str, value: str, timeout_ms: int = 10000) -> Any:
+        """Type *value* into an input field by CSS selector."""
+        escaped_sel = selector.replace("\\", "\\\\").replace("`", "\\`")
+        escaped_val = value.replace("\\", "\\\\").replace("`", "\\`")
+        code = f"async (page) => {{ await page.locator(`{escaped_sel}`).fill(`{escaped_val}`, {{ timeout: {timeout_ms} }}); }}"
+        return await self.call_tool("browser_run_code", {"code": code})
 
-    async def wait_for(self, selector: str, timeout_ms: int = 5000) -> dict:
-        """Wait for an element to appear."""
-        return await self.call_tool("browser_wait_for_selector", {"selector": selector, "timeout": timeout_ms})
+    async def wait_time(self, seconds: float) -> Any:
+        """Wait for a fixed number of seconds."""
+        return await self.call_tool("browser_wait_for", {"time": seconds})
+
+    async def wait_for_text(self, text: str, timeout_ms: int = 10000) -> Any:
+        """Wait for specific text to appear on the page."""
+        escaped = text.replace("\\", "\\\\").replace("`", "\\`")
+        code = f"async (page) => {{ await page.getByText(`{escaped}`).first().waitFor({{ timeout: {timeout_ms} }}); }}"
+        return await self.call_tool("browser_run_code", {"code": code})
 
     async def screenshot(self) -> bytes:
         """Take a screenshot and return raw PNG bytes."""
-        result = await self.call_tool("browser_screenshot", {})
+        result = await self.call_tool("browser_take_screenshot", {"type": "png"})
         for block in result.content:
             if isinstance(block, ImageContent):
                 return base64.b64decode(block.data)
@@ -206,8 +176,15 @@ class PlaywrightMCPClient:
         raise RuntimeError("Screenshot result did not contain decodable image data")
 
     async def get_text(self, selector: str) -> str:
-        """Get text content of an element identified by *selector*."""
-        result = await self.call_tool("browser_get_text", {"selector": selector})
+        """Get text content of an element by CSS selector."""
+        escaped = selector.replace("\\", "\\\\").replace("`", "\\`")
+        code = f"async (page) => {{ return await page.locator(`{escaped}`).innerText({{ timeout: 10000 }}); }}"
+        result = await self.call_tool("browser_run_code", {"code": code})
+        return _extract_text(result.content)
+
+    async def snapshot(self) -> str:
+        """Get an accessibility snapshot of the current page."""
+        result = await self.call_tool("browser_snapshot", {})
         return _extract_text(result.content)
 
     async def close_browser(self) -> Any:

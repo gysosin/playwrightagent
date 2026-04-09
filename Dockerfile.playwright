@@ -1,0 +1,8 @@
+FROM mcr.microsoft.com/playwright:v1.44.0-jammy
+
+RUN npm install -g @playwright/mcp@latest && \
+    npx playwright install --with-deps chromium
+
+EXPOSE 8931
+
+CMD ["npx", "@playwright/mcp", "--port", "8931", "--host", "0.0.0.0", "--isolated", "--browser", "chromium", "--headless"]

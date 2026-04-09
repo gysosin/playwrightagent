@@ -27,19 +27,42 @@ from db.queries import (
 logger = logging.getLogger(__name__)
 
 _HEALING_SYSTEM_PROMPT = """\
-You are a browser automation expert. A Playwright action failed because the \
-website has changed.
+You are a browser automation expert. A step failed during execution.
 
-You will be given:
-1. The original step description
-2. The error that occurred
-3. A screenshot of the current page state
+You will receive the original step, the error, and a screenshot of the current \
+page. Look at the screenshot carefully to understand what is actually on the \
+page right now.
 
-Your job: generate a NEW JSON action object that accomplishes the same goal \
-as the original step but works with the current page state.
+Your job: produce a NEW action JSON that achieves the same goal but works with \
+the current page state.
 
-Return ONLY a single JSON object (the new action), no explanation.
-Format: {"action": "...", "selector": "...", "value": "...", "url": "...", "description": "..."}\
+Actions available:
+  navigate  — Fields: "url"
+  click     — Fields: "selector" (fails if not found)
+  try_click — Fields: "selector" (skips silently if not found — use for optional elements)
+  hover     — Fields: "selector" (hover over element for menus/effects)
+  fill      — Fields: "selector", "value"
+  wait_for  — Fields: "wait_seconds" (number) and/or "wait_text" (visible text)
+  screenshot — no extra fields
+  get_text  — Fields: "selector"
+  close     — no extra fields
+
+CRITICAL RULES:
+- NEVER change the action type unless you have a very good reason.
+  If the original was "click", return "click". If "fill", return "fill".
+- Only use "try_click" if the original was already "try_click".
+- Look at the PAGE SNAPSHOT below — it lists every element on the page.
+  Find the actual element that matches the step's goal and use its exact text or attributes.
+- If you see the target element in the snapshot, use a "text=..." selector matching its visible text.
+
+Every action must have "action" and "description".
+
+Use whatever selector strategy fits the actual page:
+  "text=Sign In"  for visible text (most reliable)
+  "#id", "[attr]", "tag" for structural selectors
+For wait_for, use "wait_seconds" or "wait_text", never CSS selectors.
+
+Return ONLY a single JSON object. No explanation.\
 """
 
 
@@ -56,19 +79,27 @@ async def _call_llm_heal(
     failed_step: dict,
     error_message: str,
     screenshot_b64: str,
+    page_snapshot: str = "",
 ) -> dict:
     """Ask the LLM to produce a replacement action for a failed step."""
     client = _build_openai_client()
     settings = get_settings()
 
+    context_text = (
+        f"Original step description: {failed_step.get('description', 'N/A')}\n"
+        f"Original action: {json.dumps(failed_step)}\n"
+        f"Error: {error_message}"
+    )
+    if page_snapshot:
+        context_text += (
+            f"\n\n--- PAGE SNAPSHOT (accessibility tree of current page) ---\n"
+            f"{page_snapshot[:8000]}"
+        )
+
     user_content: list[dict] = [
         {
             "type": "text",
-            "text": (
-                f"Original step description: {failed_step.get('description', 'N/A')}\n"
-                f"Original action: {json.dumps(failed_step)}\n"
-                f"Error: {error_message}"
-            ),
+            "text": context_text,
         },
         {
             "type": "image_url",
@@ -118,6 +149,7 @@ async def heal_step(
     failed_step: dict,
     error_message: str,
     current_page_screenshot: bytes,
+    page_snapshot: str = "",
 ) -> dict:
     """Auto-heal a broken step using the LLM.
 
@@ -153,7 +185,7 @@ async def heal_step(
         error_message[:120],
     )
 
-    new_action = await _call_llm_heal(failed_step, error_message, screenshot_b64)
+    new_action = await _call_llm_heal(failed_step, error_message, screenshot_b64, page_snapshot)
 
     # Build the updated step list with the healed action replacing the failed one.
     new_steps = list(steps)  # shallow copy

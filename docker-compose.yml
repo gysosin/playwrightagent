@@ -1,13 +1,9 @@
-version: "3.8"
-
 services:
   playwright-mcp:
-    image: mcr.microsoft.com/playwright:v1.44.0-jammy
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
     container_name: playwright-mcp
-    working_dir: /app
-    command: >
-      bash -c "npm install -g @playwright/mcp@latest &&
-               npx @playwright/mcp --port 8931 --host 0.0.0.0"
     ports:
       - "8931:8931"
     environment:

@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS revisions (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS sop_playbooks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sop_id TEXT UNIQUE NOT NULL,
+    steps JSONB NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    last_success_at TIMESTAMPTZ DEFAULT now(),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_step_sequences_task_active
     ON step_sequences (task_id, is_active) WHERE is_active = true;
 

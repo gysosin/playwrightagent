@@ -23,17 +23,36 @@ from db.queries import (
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
-You are a browser automation expert. Convert the user's natural language steps \
-into a JSON array of Playwright actions.
+You are a browser automation expert. You can automate any website. Convert the \
+user's natural language into a JSON array of browser actions.
 
-Each action must be a JSON object with these fields:
-- "action": one of "navigate", "click", "fill", "wait_for", "screenshot", "get_text", "close"
-- "selector": CSS selector or XPath (for click/fill/wait_for/get_text actions)
-- "value": string value (for fill actions only)
-- "url": URL string (for navigate actions only)
-- "description": human-readable description of this step
+Actions available:
+  navigate  — go to a URL. Fields: "url"
+  click     — click something (fails if not found). Fields: "selector"
+  try_click — click if element exists, skip silently if not. Fields: "selector"
+              Use for optional elements: cookie banners, popups, dismiss buttons.
+  hover     — move mouse over an element (for hover menus/effects). Fields: "selector"
+  fill      — type into an input. Fields: "selector", "value"
+  wait_for  — pause before continuing. Fields: "wait_seconds" (number) and/or "wait_text" (visible text to wait for)
+  screenshot — capture the screen. No extra fields.
+  get_text  — read visible text. Fields: "selector"
+  close     — close the browser. No extra fields.
 
-Return ONLY a valid JSON array. No explanation, no markdown code blocks, just the raw JSON array.\
+Every action object must also have "action" and "description" (human-readable).
+
+Selector tips — pick whatever works best for the site:
+  "text=Sign In"           visible text (most reliable for buttons/links/tabs)
+  "#email"                 ID selector
+  "input[name='q']"        attribute selector
+  "h1", "body", "table"   tag selectors
+  ".class-name"            class selector (only when you're confident it exists)
+
+Think about what a human would actually see and click on the page. Use visible \
+text selectors when the element has readable text. Use "body" for get_text when \
+you need to read the whole page. Add a short wait_for after navigation or clicks \
+that trigger page loads.
+
+Return ONLY a valid JSON array. No markdown, no explanation.\
 """
 
 
@@ -101,22 +120,26 @@ async def interpret_steps(task_name: str, nl_steps: str) -> dict:
     # Check for an existing task with an active sequence.
     task = await get_task_by_name(task_name)
     if task is not None:
-        sequence = await get_active_sequence(str(task["id"]))
-        if sequence is not None:
-            logger.info("Returning cached sequence for task %r", task_name)
-            steps = sequence["steps"]
-            # asyncpg may return JSONB as a string or as a Python object.
-            if isinstance(steps, str):
-                steps = json.loads(steps)
-            return {
-                "task_id": str(task["id"]),
-                "sequence_id": str(sequence["id"]),
-                "revision": sequence["revision"],
-                "steps": steps,
-                "cached": True,
-            }
+        # Only return cached if the nl_steps haven't changed.
+        stored_nl = task.get("nl_steps", "")
+        if stored_nl == nl_steps:
+            sequence = await get_active_sequence(str(task["id"]))
+            if sequence is not None:
+                logger.info("Returning cached sequence for task %r", task_name)
+                steps = sequence["steps"]
+                if isinstance(steps, str):
+                    steps = json.loads(steps)
+                return {
+                    "task_id": str(task["id"]),
+                    "sequence_id": str(sequence["id"]),
+                    "revision": sequence["revision"],
+                    "steps": steps,
+                    "cached": True,
+                }
+        else:
+            logger.info("nl_steps changed for task %r — re-interpreting", task_name)
 
-    # No cached result — call the LLM.
+    # Call the LLM to interpret.
     logger.info("Calling LLM to interpret steps for task %r", task_name)
     steps = await _call_llm(nl_steps)
 
@@ -125,7 +148,14 @@ async def interpret_steps(task_name: str, nl_steps: str) -> dict:
         task = await create_task(task_name, nl_steps)
 
     task_id = str(task["id"])
-    sequence = await create_step_sequence(task_id, revision=1, steps=steps)
+    next_rev = 1
+    # If task already exists, deactivate old sequences and bump revision.
+    if task.get("nl_steps", "") != nl_steps:
+        from db.queries import deactivate_all_sequences, get_next_revision
+        next_rev = await get_next_revision(task_id)
+        await deactivate_all_sequences(task_id)
+
+    sequence = await create_step_sequence(task_id, revision=next_rev, steps=steps)
 
     return {
         "task_id": task_id,

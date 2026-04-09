@@ -100,7 +100,7 @@ async def get_next_revision(task_id: str) -> int:
 # Executions
 # ------------------------------------------------------------------
 
-async def create_execution(task_id: str, step_sequence_id: str) -> dict:
+async def create_execution(task_id: str, step_sequence_id: str | None = None) -> dict:
     """Create a new execution record with status ``running``."""
     row = await fetchrow(
         """
@@ -224,3 +224,43 @@ async def get_step_logs_for_execution(execution_id: str) -> list[dict]:
         execution_id,
     )
     return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------
+# SOP Playbooks
+# ------------------------------------------------------------------
+
+async def get_sop_playbook(sop_id: str) -> dict | None:
+    """Get a saved SOP playbook by its ID."""
+    row = await fetchrow(
+        "SELECT * FROM sop_playbooks WHERE sop_id = $1",
+        sop_id,
+    )
+    return dict(row) if row else None
+
+
+async def save_sop_playbook(sop_id: str, steps: list[dict]) -> dict:
+    """Save or update an SOP playbook. Bumps version on update."""
+    existing = await get_sop_playbook(sop_id)
+    if existing:
+        row = await fetchrow(
+            """
+            UPDATE sop_playbooks
+            SET steps = $2::jsonb, version = version + 1, last_success_at = now()
+            WHERE sop_id = $1
+            RETURNING *
+            """,
+            sop_id,
+            json.dumps(steps),
+        )
+    else:
+        row = await fetchrow(
+            """
+            INSERT INTO sop_playbooks (sop_id, steps, version)
+            VALUES ($1, $2::jsonb, 1)
+            RETURNING *
+            """,
+            sop_id,
+            json.dumps(steps),
+        )
+    return dict(row)
