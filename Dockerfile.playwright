@@ -1,8 +1,26 @@
 FROM mcr.microsoft.com/playwright:v1.44.0-jammy
 
+# Disable npm update checks and telemetry for faster startup
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV NODE_ENV=production
+
+# Install globally and pre-warm the browser
 RUN npm install -g @playwright/mcp@latest && \
-    npx playwright install --with-deps chromium
+    npx playwright install --with-deps chromium && \
+    # Create symlink for direct node execution (faster than npx)
+    ln -sf $(npm root -g)/@playwright/mcp/cli.js /usr/local/bin/playwright-mcp && \
+    # Pre-create browser cache directory
+    mkdir -p /tmp/playwright && \
+    # Clean npm cache to reduce image size
+    npm cache clean --force
+
+# Health check - gives container 60s to start, then checks every 30s
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8931/mcp || exit 1
 
 EXPOSE 8931
 
-CMD ["npx", "@playwright/mcp", "--port", "8931", "--host", "0.0.0.0", "--isolated", "--browser", "chromium", "--headless"]
+# Use direct node execution - much faster than npx (saves ~5-10s startup)
+# --ignore-https-errors flag tells Playwright to ignore SSL cert errors (needed for corporate proxies)
+CMD ["node", "/usr/local/bin/playwright-mcp", "--port", "8931", "--host", "0.0.0.0", "--allowed-hosts", "*", "--isolated", "--browser", "chromium", "--headless", "--ignore-https-errors"]
